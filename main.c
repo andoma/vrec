@@ -30,7 +30,6 @@
 #include <linux/videodev2.h>
 
 
-#include <libavdevice/avdevice.h>
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
@@ -688,7 +687,7 @@ readvideoframes(void)
   const uint8_t *src;
   uint8_t *dst;
   int64_t pts, pts_start = AV_NOPTS_VALUE;
-  uint8_t *data[4];
+  const uint8_t *data[4];
   int linesize[4];
   
 
@@ -771,7 +770,6 @@ main(int argc, char **argv)
 
 
   av_log_set_level(AV_LOG_DEBUG);
-  avdevice_register_all();
   av_register_all();
 
   if(opendev())

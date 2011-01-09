@@ -1,14 +1,23 @@
-FFMPEG ?= /usr/local
+FFMPEG_LDFLAGS := \
+	$(shell pkg-config --libs libavformat) \
+	$(shell pkg-config --libs libavcodec) \
+	$(shell pkg-config --libs libavutil) \
+	$(shell pkg-config --libs libswscale) \
+
+FFMPEG_CFLAGS := \
+	$(shell pkg-config --cflags libavformat) \
+	$(shell pkg-config --cflags libavcodec) \
+	$(shell pkg-config --cflags libavutil) \
+	$(shell pkg-config --cflags libswscale) \
 
 TOPDIR=$(shell pwd)
 SRCS = main.c
 
 PROG = vrec
-CFLAGS += -g -Wall -Werror -O2
+CFLAGS += -g -Wall -Werror -O2 -Wno-deprecated-declarations
 
-CFLAGS += -I$(FFMPEG)/include
-LIBS   += -L$(FFMPEG)/lib -lswscale -lavdevice -lavformat -lavcodec -lavutil -lasound
-LIBS   += -lm -lz -lXv -lX11 -lpthread
+CFLAGS += $(FFMPEG_CFLAGS)
+LIBS   += $(FFMPEG_LDFLAGS) -lasound -lm -lz -lXv -lX11 -lpthread
 
 .OBJDIR=        obj
 DEPFLAG = -M
