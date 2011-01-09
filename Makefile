@@ -11,7 +11,7 @@ FFMPEG_CFLAGS := \
 	$(shell pkg-config --cflags libswscale) \
 
 TOPDIR=$(shell pwd)
-SRCS = main.c
+SRCS = main.c rec.c
 
 PROG = vrec
 CFLAGS += -g -Wall -Werror -O2 -Wno-deprecated-declarations

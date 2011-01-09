@@ -34,13 +34,39 @@
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
 
+#include "vrec.h"
+
+pthread_mutex_t rec_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t  rec_cond  = PTHREAD_COND_INITIALIZER;
+struct rec_msg_queue rec_msgs;
+static int v_pixfmt;
+static int v_width;
+static int v_height;
+static int v_fd;
+static int recording;
+static void *buf_ptr[256];
+const char *output_basename;
+struct SwsContext *v_sws;
+
+
+/**
+ *
+ */
+int64_t
+get_ts(void)
+{
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return (int64_t)tv.tv_sec * 1000000LL + tv.tv_usec;
+}
+
+
 static void start_output(void);
 
 static void stop_output(void);
 
 
 
-static pthread_mutex_t outputmutex = PTHREAD_MUTEX_INITIALIZER;
 
 struct fmt_map {
     enum PixelFormat ff_fmt;
@@ -130,12 +156,6 @@ static enum PixelFormat fmt_v4l2ff(uint32_t pix_fmt)
 
 
 
-static int v_pixfmt;
-static int v_width;
-static int v_height;
-static int v_fd;
-
-static void *buf_ptr[256];
 
 /**
  *
@@ -472,208 +492,6 @@ opendisplay(void)
   return 0;
 }
 
-const char *output_basename;
-static AVFrame out_videoframe;
-static AVCodecContext *v_ctx;
-static AVStream *v_st;
-static int video_outbuf_size;
-static uint8_t *video_outbuf;
-static AVFormatContext *outformat;
-struct SwsContext *v_sws;
-
-static int do_output;
-
-/**
- *
- */
-static int
-openoutput(void)
-{
-  AVOutputFormat *fmt;
-  AVFormatContext *oc;
-  AVStream *st;
-  struct stat sbuf;
-  AVCodecContext *avctx;
-  AVCodec *c;
-  const char *postfix = "dv";
-  char filename[256];
-  int i = 1;
-
-  if(output_basename == NULL) {
-    fprintf(stderr, "No output filename given\n");
-    return -1;
-  }
-
-  while(1) {
-    snprintf(filename, sizeof(filename), "%s.%d.%s", 
-	     output_basename, i, postfix);
-    if(stat(filename, &sbuf))
-      break;
-    i++;
-  }
-
-  fprintf(stderr, "Opening output to %s\n", filename);
-
-
-  fmt = guess_format(postfix, NULL, NULL);
-
-  assert(fmt != NULL);
-
-  oc = avformat_alloc_context();
-  if(!oc) {
-    fprintf(stderr, "Memory error\n");
-    return -1;
-  }
- 
-  oc->oformat = fmt;
-  snprintf(oc->filename, sizeof(oc->filename), "%s", filename);
-
-  
-  st = av_new_stream(oc, 0);
-  avctx = st->codec;
-  avctx->codec_type = CODEC_TYPE_VIDEO;
-
-  avctx->codec_id = CODEC_ID_DVVIDEO;
-//  avctx->codec_id = CODEC_ID_MPEG2VIDEO;
-
-  avctx->bit_rate = 1000000;
-  avctx->width = 720;
-  avctx->height = 576;
-  avctx->time_base.den = 25;
-  avctx->time_base.num = 1;
-  avctx->pix_fmt = PIX_FMT_YUV422P;
-
-#if 0
-  avctx->mb_decision = FF_MB_DECISION_RD;
-  avctx->trellis = 2;
-  avctx->me_cmp = 2;
-  avctx->me_sub_cmp = 2;
-  avctx->flags |= CODEC_FLAG_QP_RD;
-  avctx->gop_size = 12;
-  avctx->max_b_frames = 2;
-#endif
-
-
-  avctx->flags |= CODEC_FLAG_INTERLACED_DCT;
-  avctx->flags |= CODEC_FLAG_INTERLACED_ME;
-
-  avpicture_alloc((AVPicture *)&out_videoframe, PIX_FMT_YUV422P,
-		  v_width, v_height);
-
-  if (av_set_parameters(oc, NULL) < 0) {
-    fprintf(stderr, "Invalid output format parameters\n");
-    return -1;
-  }
-
-  dump_format(oc, 0, filename, 1);
-
-  c = avcodec_find_encoder(avctx->codec_id);
-  if(avcodec_open(avctx, c)) {
-    fprintf(stderr, "Unable to open codec\n");
-    return -1;
-  }
-  v_ctx = avctx;
-  v_st = st;
-
-  if(url_fopen(&oc->pb, filename, URL_WRONLY) < 0) {
-    fprintf(stderr, "Could not open '%s'\n", filename);
-    return -1;
-  }
-
-  /* write the stream header, if any */
-  av_write_header(oc);
-
-  outformat = oc;
-
-  video_outbuf_size = 600000;
-  video_outbuf = av_malloc(video_outbuf_size);
-
-  v_sws = sws_getContext(v_width, v_height, PIX_FMT_YUYV422, 
-			 v_width, v_height, PIX_FMT_YUV422P,
-			 SWS_BICUBIC | SWS_PRINT_INFO |
-			 SWS_CPU_CAPS_MMX | SWS_CPU_CAPS_MMX2,
-			 NULL, NULL, NULL);
-
-  do_output = 1;
-
-
-  return 0;
-}
-
-/*
- *
- */
-static int
-closeoutput(void)
-{
-  AVStream *st;
-  int i;
-
-  do_output = 0;
-
-  fprintf(stderr, "Closing output\n");
-
-  sws_freeContext(v_sws);
-  v_sws = NULL;
-
-
-  free(video_outbuf);
-
-  av_write_trailer(outformat);
-
-  
-  for(i = 0; i < outformat->nb_streams; i++) {
-    st = outformat->streams[i];
-    avcodec_close(st->codec);
-    free(st->codec);
-    free(st);
-  }
-
-
-  url_fclose(outformat->pb);
-  free(outformat);
-  return 0;
-}
-
-
-
-/**
- *
- */
-static void
-write_video(void)
-{
-  int r;
-  AVPacket pkt;
-
-  r = avcodec_encode_video(v_ctx, video_outbuf, video_outbuf_size, 
-			   &out_videoframe);
-
-  if(r == 0)
-    return;
-
-   av_init_packet(&pkt);
-
-  if(v_ctx->coded_frame->pts != AV_NOPTS_VALUE)
-    pkt.pts = av_rescale_q(v_ctx->coded_frame->pts, 
-			   AV_TIME_BASE_Q, v_st->time_base);
-
-  if(v_ctx->coded_frame->key_frame)
-    pkt.flags |= PKT_FLAG_KEY;
-
-  pkt.stream_index= v_st->index;
-  pkt.data= video_outbuf;
-  pkt.size= r;
-  
-  /* write the compressed frame in the media file */
-  r = av_interleaved_write_frame(outformat, &pkt);
-
-  if (r != 0) {
-    fprintf(stderr, "Error while writing video frame\n");
-  }
-}
-
-
 
 /**
  *
@@ -715,7 +533,6 @@ readvideoframes(void)
     } else {
       pts -= pts_start;
     }
-    out_videoframe.pts = pts;
 
     memcpy(dst, src, v_xvimage->data_size);
 
@@ -728,29 +545,70 @@ readvideoframes(void)
     XFlush(v_display);
     XSync(v_display, False);
 
-    pthread_mutex_lock(&outputmutex);
+    pthread_mutex_lock(&rec_mutex);
+    if(recording) {
+      rec_msg_t *rm = calloc(1, sizeof(rec_msg_t));
+      rm->type = REC_PICTURE;
+      avpicture_alloc(&rm->picture, PIX_FMT_YUV422P, v_width, v_height);
 
-    if(v_sws) {
       sws_scale(v_sws, data, linesize, 0, 576,
-		out_videoframe.data, out_videoframe.linesize);
-    }
+		rm->picture.data, rm->picture.linesize);
 
-    pthread_mutex_unlock(&outputmutex);
+      TAILQ_INSERT_TAIL(&rec_msgs, rm, link);
+      pthread_cond_signal(&rec_cond);
+    }
+    pthread_mutex_unlock(&rec_mutex);
 
     ioctl(fd, VIDIOC_QBUF, &buf);
-
-    pthread_mutex_lock(&outputmutex);
-
-    if(do_output)
-      write_video();
-
-    pthread_mutex_unlock(&outputmutex);
-
   }
-
   return 0;
 }
 
+
+
+/**
+ *
+ */
+static void
+send_rec_msg(int m)
+{
+  rec_msg_t *rm = calloc(1, sizeof(rec_msg_t));
+  rm->type = m;
+
+  TAILQ_INSERT_TAIL(&rec_msgs, rm, link);
+  pthread_cond_signal(&rec_cond);
+}
+
+
+static void
+start_output(void)
+{
+  pthread_mutex_lock(&rec_mutex);
+
+  v_sws = sws_getContext(v_width, v_height, PIX_FMT_YUYV422, 
+			 v_width, v_height, PIX_FMT_YUV422P,
+			 SWS_BICUBIC | SWS_PRINT_INFO |
+			 SWS_CPU_CAPS_MMX | SWS_CPU_CAPS_MMX2,
+			 NULL, NULL, NULL);
+
+
+  send_rec_msg(REC_START);
+  recording = 1;
+  pthread_mutex_unlock(&rec_mutex);
+}
+
+static void
+stop_output(void)
+{
+  pthread_mutex_lock(&rec_mutex);
+
+  send_rec_msg(REC_STOP);
+  recording = 0;
+  sws_freeContext(v_sws);
+  v_sws = NULL;
+  pthread_mutex_unlock(&rec_mutex);
+
+}
 
 /**
  *
@@ -759,6 +617,8 @@ int
 main(int argc, char **argv)
 {
   int c;
+
+  TAILQ_INIT(&rec_msgs);
 
   while((c = getopt(argc, argv, "f:")) != -1) {
     switch(c) {
@@ -772,6 +632,8 @@ main(int argc, char **argv)
   av_log_set_level(AV_LOG_DEBUG);
   av_register_all();
 
+  init_recorder();
+  
   if(opendev())
     exit(1);
 
@@ -784,22 +646,3 @@ main(int argc, char **argv)
 }
 
 
-static void
-start_output(void)
-{
-  pthread_mutex_lock(&outputmutex);
-  if(!do_output) {
-    openoutput();
-  }
-  pthread_mutex_unlock(&outputmutex);
-}
-
-static void
-stop_output(void)
-{
-  pthread_mutex_lock(&outputmutex);
-  if(do_output) {
-    closeoutput();
-  }
-  pthread_mutex_unlock(&outputmutex);
-}
