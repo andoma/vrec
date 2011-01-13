@@ -36,17 +36,37 @@
 
 #include "vrec.h"
 
+/**
+ * Global
+ */
 pthread_mutex_t rec_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t  rec_cond  = PTHREAD_COND_INITIALIZER;
+const char *output_basename;
 struct rec_msg_queue rec_msgs;
+
+
+/**
+ * Local
+ */
 static int v_pixfmt;
 static int v_width;
 static int v_height;
 static int v_fd;
 static int recording;
 static void *buf_ptr[256];
-const char *output_basename;
-struct SwsContext *v_sws;
+static struct SwsContext *rec_sws;
+
+static Display *v_display;
+static Window v_window;
+static int v_screen;
+static GC v_gc;
+
+static int v_xv_port;
+static XShmSegmentInfo v_shminfo;
+static XvImage *v_xvimage;
+
+static int dpy_width;
+static int dpy_height;
 
 
 /**
@@ -320,19 +340,12 @@ opendev(void)
 }
 
 
-static Display *v_display;
-static Window v_window;
-static int v_screen;
-static GC v_gc;
 
-static pthread_t xevent_thread_id;
-static int v_xv_port;
-static XShmSegmentInfo v_shminfo;
-static XvImage *v_xvimage;
 
 
 static void
 keypress(XEvent *event)
+
 {
   char str[16];
   KeySym keysym;
@@ -352,26 +365,31 @@ keypress(XEvent *event)
   }
 }
 
-
-
-
-static void *
-xevent_thread(void *aux)
+static void
+do_x_stuff(void)
 {
   XEvent event;
-
-  while(1) {
-    XNextEvent(v_display, &event);
-
+  int w, h;
+  if(XCheckWindowEvent(v_display, v_window, 0xffffffff, &event)) {
     switch(event.type) {
       
     case KeyPress:
       keypress(&event);
       break;
+
+    case ConfigureNotify:
+      w = event.xconfigure.width;
+      h = event.xconfigure.height;
+      if(dpy_width != w || dpy_height != h) {
+	dpy_width = w;
+	dpy_height = h;
+	XFillRectangle(v_display, v_window, v_gc, 0, 0, w, h);
+      }
+      break;
     }
   }
-  return NULL;
 }
+
 
 /**
  *
@@ -398,7 +416,8 @@ opendisplay(void)
   XGCValues xgcv;
   XEvent event;
 
-  XInitThreads();
+  dpy_width = 720;
+  dpy_height = 576;
 
   v_display = XOpenDisplay(NULL);
 
@@ -424,8 +443,8 @@ opendisplay(void)
 
   v_window = XCreateWindow(v_display, rootwin, 
 			   0, 0, 
-			   720,
-			   576,
+			   dpy_width,
+			   dpy_height,
 			   0,
 			   vinfo.depth, 
 			   InputOutput,
@@ -440,11 +459,6 @@ opendisplay(void)
   XIfEvent(v_display, &event, WaitForNotify, (char *)v_window);
   
   v_gc = XCreateGC(v_display, v_window, 0, &xgcv);
-
-
-  pthread_create(&xevent_thread_id, NULL, xevent_thread, NULL);
-
-
 
   if(XvQueryAdaptors(v_display, DefaultRootWindow(v_display), 
 		     &adaptors, &ai) != Success) {
@@ -514,8 +528,9 @@ readvideoframes(void)
   buf.memory = V4L2_MEMORY_MMAP;
 
   while(1) {
-    r = ioctl(fd, VIDIOC_DQBUF, &buf);
+    do_x_stuff();
 
+    r = ioctl(fd, VIDIOC_DQBUF, &buf);
     if(r < 0)
       break;
 
@@ -534,30 +549,42 @@ readvideoframes(void)
       pts -= pts_start;
     }
 
-    memcpy(dst, src, v_xvimage->data_size);
+    float a = (float)dpy_width / (dpy_height * (float)v_width / v_height);
+    int frame_width, frame_height;
 
+    if(a > 1) {
+      frame_width  = dpy_width / a;
+      frame_height = dpy_height;
+    } else {
+      frame_width = dpy_width;
+      frame_height = dpy_height * a;
+    }
+
+    memcpy(dst, src, v_xvimage->data_size);
     XvShmPutImage(v_display, v_xv_port, v_window, 
 		  v_gc, v_xvimage, 
 		  0, 0, v_width, v_height, 
-		  0, 0, v_width, v_height, 
+		  (dpy_width - frame_width) / 2,
+		  (dpy_height - frame_height) / 2,
+		  frame_width, frame_height,
 		  False);
 
     XFlush(v_display);
     XSync(v_display, False);
 
-    pthread_mutex_lock(&rec_mutex);
     if(recording) {
       rec_msg_t *rm = calloc(1, sizeof(rec_msg_t));
       rm->type = REC_PICTURE;
       avpicture_alloc(&rm->picture, PIX_FMT_YUV422P, v_width, v_height);
 
-      sws_scale(v_sws, data, linesize, 0, 576,
+      sws_scale(rec_sws, data, linesize, 0, 576,
 		rm->picture.data, rm->picture.linesize);
 
+      pthread_mutex_lock(&rec_mutex);
       TAILQ_INSERT_TAIL(&rec_msgs, rm, link);
       pthread_cond_signal(&rec_cond);
+      pthread_mutex_unlock(&rec_mutex);
     }
-    pthread_mutex_unlock(&rec_mutex);
 
     ioctl(fd, VIDIOC_QBUF, &buf);
   }
@@ -585,11 +612,11 @@ start_output(void)
 {
   pthread_mutex_lock(&rec_mutex);
 
-  v_sws = sws_getContext(v_width, v_height, PIX_FMT_YUYV422, 
-			 v_width, v_height, PIX_FMT_YUV422P,
-			 SWS_BICUBIC | SWS_PRINT_INFO |
-			 SWS_CPU_CAPS_MMX | SWS_CPU_CAPS_MMX2,
-			 NULL, NULL, NULL);
+  rec_sws = sws_getContext(v_width, v_height, PIX_FMT_YUYV422, 
+			   v_width, v_height, PIX_FMT_YUV422P,
+			   SWS_BICUBIC | SWS_PRINT_INFO |
+			   SWS_CPU_CAPS_MMX | SWS_CPU_CAPS_MMX2,
+			   NULL, NULL, NULL);
 
 
   send_rec_msg(REC_START);
@@ -604,8 +631,8 @@ stop_output(void)
 
   send_rec_msg(REC_STOP);
   recording = 0;
-  sws_freeContext(v_sws);
-  v_sws = NULL;
+  sws_freeContext(rec_sws);
+  rec_sws = NULL;
   pthread_mutex_unlock(&rec_mutex);
 
 }
