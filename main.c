@@ -67,7 +67,7 @@ static XvImage *v_xvimage;
 
 static int dpy_width;
 static int dpy_height;
-
+static int v_refill;
 
 /**
  *
@@ -370,11 +370,17 @@ do_x_stuff(void)
 {
   XEvent event;
   int w, h;
-  if(XCheckWindowEvent(v_display, v_window, 0xffffffff, &event)) {
+  while(XCheckWindowEvent(v_display, v_window, 0xffffffff, &event)) {
     switch(event.type) {
       
     case KeyPress:
       keypress(&event);
+      break;
+    case Expose:
+      v_refill = 1;
+      break;
+    case VisibilityNotify:
+      v_refill = 1;
       break;
 
     case ConfigureNotify:
@@ -383,7 +389,7 @@ do_x_stuff(void)
       if(dpy_width != w || dpy_height != h) {
 	dpy_width = w;
 	dpy_height = h;
-	XFillRectangle(v_display, v_window, v_gc, 0, 0, w, h);
+	v_refill = 1;
       }
       break;
     }
@@ -439,7 +445,7 @@ opendisplay(void)
   
   swa.colormap = cmap;
   swa.border_pixel = 0;
-  swa.event_mask = StructureNotifyMask | KeyPressMask;
+  swa.event_mask = StructureNotifyMask | KeyPressMask | VisibilityChangeMask | ExposureMask;
 
   v_window = XCreateWindow(v_display, rootwin, 
 			   0, 0, 
@@ -561,6 +567,12 @@ readvideoframes(void)
     }
 
     memcpy(dst, src, v_xvimage->data_size);
+
+    if(v_refill) {
+      XFillRectangle(v_display, v_window, v_gc, 0, 0, dpy_width, dpy_height);
+      v_refill = 0;
+    }
+
     XvShmPutImage(v_display, v_xv_port, v_window, 
 		  v_gc, v_xvimage, 
 		  0, 0, v_width, v_height, 
