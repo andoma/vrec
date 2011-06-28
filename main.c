@@ -48,6 +48,7 @@ struct rec_msg_queue rec_msgs;
 /**
  * Local
  */
+static int g_wide;
 static int v_pixfmt;
 static int v_width;
 static int v_height;
@@ -556,6 +557,10 @@ readvideoframes(void)
     }
 
     float a = (float)dpy_width / (dpy_height * (float)v_width / v_height);
+
+    if(g_wide)
+	a = a / 1.3333;
+
     int frame_width, frame_height;
 
     if(a > 1) {
@@ -659,10 +664,13 @@ main(int argc, char **argv)
 
   TAILQ_INIT(&rec_msgs);
 
-  while((c = getopt(argc, argv, "f:")) != -1) {
+  while((c = getopt(argc, argv, "f:w")) != -1) {
     switch(c) {
     case 'f':
       output_basename = optarg;
+      break;
+    case 'w':
+      g_wide = 1;
       break;
     }
   }
